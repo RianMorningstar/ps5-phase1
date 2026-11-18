@@ -83,6 +83,17 @@ function trigger() {
           try { document.getElementById('s0').sheet.deleteRule(0); } catch (e) {}
           document.body.offsetTop;               // force recalc -> FREE
           sprayPass(1);                          // 400 buffers, 4 classes
+          // drive the font machinery AFTER the spray so a reclaimed chunk
+          // MUST show engine writes (recreate rule + recalc + check)
+          try {
+            var st = document.createElement('style');
+            st.textContent = "@font-face { font-family: x; src: local(Helvetica Narrow); unicode-range: U+0043; }";
+            document.head.appendChild(st);
+            document.body.offsetTop;
+            document.fonts.check('1em x', 'A');
+            document.fonts.check('1em x', 'ABC');
+            log('fonts.status after drive: ' + document.fonts.status);
+          } catch (e2) { log('drive threw: ' + e2); }
         }
         return undefined;
       }
